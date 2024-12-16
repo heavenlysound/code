@@ -1,0 +1,342 @@
+#region Using declarations
+using System;
+using System.Windows;
+using System.Windows.Media;
+using System.ComponentModel;
+using System.ComponentModel.DataAnnotations;
+using System.Xml.Serialization;
+using NinjaTrader.Gui;
+using NinjaTrader.Gui.Chart;
+using NinjaTrader.Data;
+using NinjaTrader.NinjaScript;
+using SharpDX;
+using SharpDX.Direct2D1;
+using SharpDX.DirectWrite;
+using System.Collections.Generic;
+#endregion
+
+namespace NinjaTrader.NinjaScript.Indicators
+{
+    public class ZigZagPivots : Indicator
+    {
+        private class PivotPoint
+        {
+            public int Bar { get; set; }
+            public double Price { get; set; }
+            public string Label { get; set; }
+            public bool IsBullish { get; set; }
+            public bool IsPattern { get; set; }
+        }
+
+        private readonly List<PivotPoint> pivotPoints = new List<PivotPoint>();
+        private int dir = 0;
+        private double lastTop = double.MinValue;
+        private double lastBot = double.MaxValue;
+        private int lastTopBar = -1;
+        private int lastBotBar = -1;
+        private double prevTop = double.MinValue;
+        private double prevBot = double.MaxValue;
+
+        private SharpDX.Direct2D1.SolidColorBrush bullBrush;
+        private SharpDX.Direct2D1.SolidColorBrush bearBrush;
+        private SharpDX.Direct2D1.SolidColorBrush zigzagBrush;
+        private SharpDX.Direct2D1.SolidColorBrush patternBrush;
+        private TextFormat textFormat;
+
+        protected override void OnStateChange()
+        {
+            if (State == State.SetDefaults)
+            {
+                Description = "ZigZag Pivot Points with Pattern Detection";
+                Name = "ZigZag Pivots";
+                Calculate = Calculate.OnBarClose;
+                IsOverlay = true;
+                DisplayInDataBox = true;
+                DrawOnPricePanel = true;
+                ScaleJustification = NinjaTrader.Gui.Chart.ScaleJustification.Right;
+                
+                StructureLengthValue = 3;
+                ZigZagColor = System.Windows.Media.Brushes.Blue;
+                LabelOffset = 5;
+                BullishColor = System.Windows.Media.Brushes.Green;
+                BearishColor = System.Windows.Media.Brushes.Red;
+                PatternColor = System.Windows.Media.Brushes.Yellow;
+            }
+            else if (State == State.Historical)
+            {
+                pivotPoints.Clear();
+            }
+            else if (State == State.Terminated)
+            {
+                if (bullBrush != null) bullBrush.Dispose();
+                if (bearBrush != null) bearBrush.Dispose();
+                if (zigzagBrush != null) zigzagBrush.Dispose();
+                if (patternBrush != null) patternBrush.Dispose();
+                if (textFormat != null) textFormat.Dispose();
+            }
+        }
+
+        protected override void OnBarUpdate()
+        {
+            if (CurrentBar < StructureLengthValue) return;
+
+            bool isHighest = true;
+            bool isLowest = true;
+
+            // Check if current bar is highest/lowest within structure length
+            for (int i = 1; i <= StructureLengthValue; i++)
+            {
+                if (High[0] <= High[i]) isHighest = false;
+                if (Low[0] >= Low[i]) isLowest = false;
+            }
+
+            if (dir == 0)
+            {
+                if (isHighest) dir = 1;
+                if (isLowest) dir = -1;
+            }
+            else if (dir == 1)  // Looking for a top
+            {
+                if (High[0] > lastTop)
+                {
+                    lastTop = High[0];
+                    lastTopBar = CurrentBar;
+                }
+                else if (isLowest)
+                {
+                    if (lastTopBar != -1)
+                    {
+                        string label;
+                        bool isPattern = false;
+                        
+                        if (Math.Abs(lastTop - prevTop) < 0.0001)
+                        {
+                            label = "DT";
+                            isPattern = true;
+                        }
+                        else
+                            label = lastTop > prevTop ? "HH" : "LH";
+
+                        pivotPoints.Add(new PivotPoint 
+                        { 
+                            Bar = lastTopBar, 
+                            Price = lastTop, 
+                            Label = label, 
+                            IsBullish = true,
+                            IsPattern = isPattern
+                        });
+                        
+                        prevTop = lastTop;
+                    }
+                    dir = -1;
+                    lastBot = Low[0];
+                    lastBotBar = CurrentBar;
+                }
+            }
+            else  // Looking for a bottom
+            {
+                if (Low[0] < lastBot)
+                {
+                    lastBot = Low[0];
+                    lastBotBar = CurrentBar;
+                }
+                else if (isHighest)
+                {
+                    if (lastBotBar != -1)
+                    {
+                        string label;
+                        bool isPattern = false;
+                        
+                        if (Math.Abs(lastBot - prevBot) < 0.0001)
+                        {
+                            label = "DB";
+                            isPattern = true;
+                        }
+                        else
+                            label = lastBot < prevBot ? "LL" : "HL";
+
+                        pivotPoints.Add(new PivotPoint 
+                        { 
+                            Bar = lastBotBar, 
+                            Price = lastBot, 
+                            Label = label, 
+                            IsBullish = false,
+                            IsPattern = isPattern
+                        });
+                        
+                        prevBot = lastBot;
+                    }
+                    dir = 1;
+                    lastTop = High[0];
+                    lastTopBar = CurrentBar;
+                }
+            }
+        }
+
+        protected override void OnRender(ChartControl chartControl, ChartScale chartScale)
+        {
+            if (bullBrush == null || bearBrush == null || zigzagBrush == null || patternBrush == null)
+            {
+                if (bullBrush != null) bullBrush.Dispose();
+                if (bearBrush != null) bearBrush.Dispose();
+                if (zigzagBrush != null) zigzagBrush.Dispose();
+                if (patternBrush != null) patternBrush.Dispose();
+
+                var bullColor = ((System.Windows.Media.SolidColorBrush)BullishColor).Color;
+                var bearColor = ((System.Windows.Media.SolidColorBrush)BearishColor).Color;
+                var zigzagColor = ((System.Windows.Media.SolidColorBrush)ZigZagColor).Color;
+                var patternColor = ((System.Windows.Media.SolidColorBrush)PatternColor).Color;
+
+                bullBrush = new SharpDX.Direct2D1.SolidColorBrush(RenderTarget, 
+                    new SharpDX.Color(bullColor.R, bullColor.G, bullColor.B, bullColor.A));
+                bearBrush = new SharpDX.Direct2D1.SolidColorBrush(RenderTarget, 
+                    new SharpDX.Color(bearColor.R, bearColor.G, bearColor.B, bearColor.A));
+                zigzagBrush = new SharpDX.Direct2D1.SolidColorBrush(RenderTarget, 
+                    new SharpDX.Color(zigzagColor.R, zigzagColor.G, zigzagColor.B, zigzagColor.A));
+                patternBrush = new SharpDX.Direct2D1.SolidColorBrush(RenderTarget, 
+                    new SharpDX.Color(patternColor.R, patternColor.G, patternColor.B, patternColor.A));
+                textFormat = new TextFormat(Core.Globals.DirectWriteFactory, "Arial", 12);
+            }
+
+            PivotPoint prevPoint = null;
+            foreach (var point in pivotPoints)
+            {
+                if (point.Bar < ChartBars.FromIndex || point.Bar > ChartBars.ToIndex)
+                    continue;
+
+                float x = chartControl.GetXByBarIndex(ChartBars, point.Bar);
+                float y = chartScale.GetYByValue(point.Price);
+                
+                var brush = point.IsPattern ? patternBrush : (point.IsBullish ? bullBrush : bearBrush);
+                float labelY = point.IsBullish ? y - (LabelOffset * 4) : y + LabelOffset;
+                RenderTarget.DrawText(point.Label, textFormat, 
+                    new SharpDX.RectangleF(x - 15, labelY, 30, 20), brush);
+
+                if (prevPoint != null)
+                {
+                    float prevX = chartControl.GetXByBarIndex(ChartBars, prevPoint.Bar);
+                    float prevY = chartScale.GetYByValue(prevPoint.Price);
+                    RenderTarget.DrawLine(new Vector2(prevX, prevY), new Vector2(x, y), zigzagBrush, 2f);
+                }
+
+                prevPoint = point;
+            }
+        }
+
+        [NinjaScriptProperty]
+        [Range(1, int.MaxValue)]
+        [Display(Name = "Structure Length", Description = "Number of bars for structure calculation", Order = 1, GroupName = "Parameters")]
+        public int StructureLengthValue { get; set; }
+
+        [NinjaScriptProperty]
+        [XmlIgnore]
+        [Display(Name = "ZigZag Color", Description = "Color of the zigzag line", Order = 2, GroupName = "Parameters")]
+        public System.Windows.Media.Brush ZigZagColor { get; set; }
+
+        [NinjaScriptProperty]
+        [XmlIgnore]
+        [Display(Name = "Bullish Color", Description = "Color for bullish labels", Order = 3, GroupName = "Parameters")]
+        public System.Windows.Media.Brush BullishColor { get; set; }
+
+        [NinjaScriptProperty]
+        [XmlIgnore]
+        [Display(Name = "Bearish Color", Description = "Color for bearish labels", Order = 4, GroupName = "Parameters")]
+        public System.Windows.Media.Brush BearishColor { get; set; }
+
+        [NinjaScriptProperty]
+        [XmlIgnore]
+        [Display(Name = "Pattern Color", Description = "Color for pattern labels (DT/DB)", Order = 5, GroupName = "Parameters")]
+        public System.Windows.Media.Brush PatternColor { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(1, 50)]
+        [Display(Name = "Label Offset", Description = "Distance between price and label", Order = 6, GroupName = "Parameters")]
+        public int LabelOffset { get; set; }
+
+        [Browsable(false)]
+        public string ZigZagColorSerializable
+        {
+            get { return Serialize.BrushToString(ZigZagColor); }
+            set { ZigZagColor = Serialize.StringToBrush(value); }
+        }
+
+        [Browsable(false)]
+        public string BullishColorSerializable
+        {
+            get { return Serialize.BrushToString(BullishColor); }
+            set { BullishColor = Serialize.StringToBrush(value); }
+        }
+
+        [Browsable(false)]
+        public string BearishColorSerializable
+        {
+            get { return Serialize.BrushToString(BearishColor); }
+            set { BearishColor = Serialize.StringToBrush(value); }
+        }
+
+        [Browsable(false)]
+        public string PatternColorSerializable
+        {
+            get { return Serialize.BrushToString(PatternColor); }
+            set { PatternColor = Serialize.StringToBrush(value); }
+        }
+    }
+}
+
+
+#region NinjaScript generated code. Neither change nor remove.
+
+namespace NinjaTrader.NinjaScript.Indicators
+{
+	public partial class Indicator : NinjaTrader.Gui.NinjaScript.IndicatorRenderBase
+	{
+		private ZigZagPivots[] cacheZigZagPivots;
+		public ZigZagPivots ZigZagPivots(int structureLengthValue, System.Windows.Media.Brush zigZagColor, System.Windows.Media.Brush bullishColor, System.Windows.Media.Brush bearishColor, System.Windows.Media.Brush patternColor, int labelOffset)
+		{
+			return ZigZagPivots(Input, structureLengthValue, zigZagColor, bullishColor, bearishColor, patternColor, labelOffset);
+		}
+
+		public ZigZagPivots ZigZagPivots(ISeries<double> input, int structureLengthValue, System.Windows.Media.Brush zigZagColor, System.Windows.Media.Brush bullishColor, System.Windows.Media.Brush bearishColor, System.Windows.Media.Brush patternColor, int labelOffset)
+		{
+			if (cacheZigZagPivots != null)
+				for (int idx = 0; idx < cacheZigZagPivots.Length; idx++)
+					if (cacheZigZagPivots[idx] != null && cacheZigZagPivots[idx].StructureLengthValue == structureLengthValue && cacheZigZagPivots[idx].ZigZagColor == zigZagColor && cacheZigZagPivots[idx].BullishColor == bullishColor && cacheZigZagPivots[idx].BearishColor == bearishColor && cacheZigZagPivots[idx].PatternColor == patternColor && cacheZigZagPivots[idx].LabelOffset == labelOffset && cacheZigZagPivots[idx].EqualsInput(input))
+						return cacheZigZagPivots[idx];
+			return CacheIndicator<ZigZagPivots>(new ZigZagPivots(){ StructureLengthValue = structureLengthValue, ZigZagColor = zigZagColor, BullishColor = bullishColor, BearishColor = bearishColor, PatternColor = patternColor, LabelOffset = labelOffset }, input, ref cacheZigZagPivots);
+		}
+	}
+}
+
+namespace NinjaTrader.NinjaScript.MarketAnalyzerColumns
+{
+	public partial class MarketAnalyzerColumn : MarketAnalyzerColumnBase
+	{
+		public Indicators.ZigZagPivots ZigZagPivots(int structureLengthValue, System.Windows.Media.Brush zigZagColor, System.Windows.Media.Brush bullishColor, System.Windows.Media.Brush bearishColor, System.Windows.Media.Brush patternColor, int labelOffset)
+		{
+			return indicator.ZigZagPivots(Input, structureLengthValue, zigZagColor, bullishColor, bearishColor, patternColor, labelOffset);
+		}
+
+		public Indicators.ZigZagPivots ZigZagPivots(ISeries<double> input , int structureLengthValue, System.Windows.Media.Brush zigZagColor, System.Windows.Media.Brush bullishColor, System.Windows.Media.Brush bearishColor, System.Windows.Media.Brush patternColor, int labelOffset)
+		{
+			return indicator.ZigZagPivots(input, structureLengthValue, zigZagColor, bullishColor, bearishColor, patternColor, labelOffset);
+		}
+	}
+}
+
+namespace NinjaTrader.NinjaScript.Strategies
+{
+	public partial class Strategy : NinjaTrader.Gui.NinjaScript.StrategyRenderBase
+	{
+		public Indicators.ZigZagPivots ZigZagPivots(int structureLengthValue, System.Windows.Media.Brush zigZagColor, System.Windows.Media.Brush bullishColor, System.Windows.Media.Brush bearishColor, System.Windows.Media.Brush patternColor, int labelOffset)
+		{
+			return indicator.ZigZagPivots(Input, structureLengthValue, zigZagColor, bullishColor, bearishColor, patternColor, labelOffset);
+		}
+
+		public Indicators.ZigZagPivots ZigZagPivots(ISeries<double> input , int structureLengthValue, System.Windows.Media.Brush zigZagColor, System.Windows.Media.Brush bullishColor, System.Windows.Media.Brush bearishColor, System.Windows.Media.Brush patternColor, int labelOffset)
+		{
+			return indicator.ZigZagPivots(input, structureLengthValue, zigZagColor, bullishColor, bearishColor, patternColor, labelOffset);
+		}
+	}
+}
+
+#endregion
